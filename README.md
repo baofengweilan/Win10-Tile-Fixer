@@ -2,13 +2,139 @@
 
 # 🩺 Win10 Tile Fixer
 
-**Windows 10 开始菜单磁贴修复工具** —— 治"磁贴沉底、上移弹回、幽灵残留、布局不保存"
+**Windows 10 Start Menu Tile Repair Tool** — fix tiles stuck at the bottom, snap-backs, ghost duplicates, and layouts that never persist
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%201709%2B-blue)
 ![PowerShell](https://img.shields.io/badge/PowerShell-7.0%2B-5391FE)
 ![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
+**English** | [中文](#中文文档)
+
 </div>
+
+## What it fixes
+
+| Symptom |
+|---|
+| Newly pinned tiles land at the very bottom, then **can't be moved** |
+| Tiles get **snapped back** to their old spot right after being moved |
+| A "**ghost**" duplicate remains at the bottom after unpinning |
+| Layout changes **never persist**, or the layout **reverts after a reboot** |
+
+> If your symptom is "I can't drop a tile into the gap between two other tiles" — that is a separate mouse drag-and-drop bug Microsoft never fixed; this tool does not apply (touch input works around it).
+
+## Why the guides online don't work
+
+| | Guides online | Win10 Tile Fixer |
+|---|---|---|
+| Stop the writers | Kills `explorer.exe` only | **Kills the svchost hosting `CDPUserSvc_*` / `OneSyncSvc_*` first** — the real writers |
+| Delete the cache | Deletes it | Deletes it |
+| Post-delete verification | None | **Waits 1.5 s and verifies the key stays deleted**; auto-retries (re-kill + re-delete) if rewritten |
+| Backup | Usually none | Auto-backup to `Backups/` before touching anything |
+| Health check | None | Data volume / policy lock / event log / duplicate shortcuts — all checked |
+
+**The principle in one paragraph**: Windows 10 (1709+) stores the Start tile layout in the registry `HKCU\...\CloudStore` key — private binary blobs in which every tile has **local / volatile / roamed** property copies plus a **graveyard** of tombstones. When this store corrupts it bloats (measured diseased store: 7.4 MB; a healthy one is tens to a few hundred KB), and the tile grid keeps getting overwritten by stale copies during **reconciliation** — that is the "snap back" mechanism. Meanwhile the per-user services `CDPUserSvc` / `OneSyncSvc` hold the stale layout **in memory** inside svchost: if you don't kill them, the key regrows within milliseconds of being deleted.
+
+Validated on a real machine (2026-11, Windows 10 22H2 / build 19045): guide-style deletion was rewritten instantly and accomplished nothing; killing the writers first, then deleting, took the store from `7.4 MB → 74 KB`, after which moving / pinning / unpinning / reboot-persistence all worked correctly.
+
+## Two fix modes
+
+| | Full reset (`-Mode full`, default) | Conservative surgery (`-Mode safe`, experimental) |
+|---|---|---|
+| Removes | the entire CloudStore key | only 3 kinds of conflict-source entries: the roamed properties map (`roamedtilepropertiesmap`), the local volatile properties map (`localstartvolatiletilepropertiesmap`), and start suggestions (`start.suggestions`) |
+| Tile layout | **reset to factory default** — re-pinning required | **kept untouched** (`start.tilegrid`, the local properties map, and the graveyard stay) |
+| Certainty | high | depends on which copy is stale: if the roamed/volatile copy wins reconciliation → cured; otherwise ineffective (harmless — fall back to a full reset) |
+| Use when | the layout is already hopeless, or safe mode didn't help | you want to keep your arrangement and try a no-reset fix first |
+
+How safe mode reasons: every tile has local / volatile / roamed copies, and "snap back" means a stale copy wins **reconciliation** over your fresh write. The surgery cuts the two most likely stale copies (roamed, volatile), forcing reconciliation onto the clean local master data. **Never delete the graveyard** — reconciliation would *resurrect* previously unpinned tiles (that is literally what the `ResurrectTile` interface does), making ghost tiles worse.
+
+Always try `-WhatIf` first to see exactly which entries would be removed on your machine.
+
+## Quick start
+
+Requires: Windows 10 1709+ and [PowerShell 7](https://aka.ms/powershell) (install with `winget install Microsoft.PowerShell` if missing)
+
+Double-click `TileFixer.bat`, or from a terminal:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action diagnose   # read-only health check
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action fix        # backup + full reset
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action fix -Mode safe -WhatIf   # dry run: preview entries only
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action fix -Mode safe            # conservative surgery: keep layout
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action restore -BackupFile .\Backups\CloudStore-backup-xxxx.reg
+```
+
+No administrator rights required.
+
+## What fix does (full reset mode)
+
+1. Backs up the CloudStore registry key (+ the disk cache folder, if present) into `Backups/`
+2. Stops the writers: the svchost processes hosting `CDPUserSvc_*` / `OneSyncSvc_*` / `UserDataPlatformSvc_*` (these services restart on demand afterwards — no manual work needed)
+3. Stops `StartMenuExperienceHost` / `ShellExperienceHost` / `explorer`
+4. Deletes `HKCU\...\CloudStore`, waits 1.5 s and verifies it stays deleted (re-kills + re-deletes once if rewritten)
+5. Restarts `explorer` — Windows rebuilds a default layout from clean data
+
+**The cost**: your tile layout resets to factory default and you re-pin once (the "All apps" list is unaffected). In exchange, moving / pinning / unpinning genuinely stick from then on.
+
+## Health metric interpretation (diagnose output)
+
+| CloudStore binary data volume | Verdict |
+|---|---|
+| < 300 KB | Healthy (74–106 KB measured on healthy machines) |
+| 300 KB – 2 MB | Watch it — observe tile behavior |
+| > 2 MB | Bloated, most likely corrupt (7.4 MB measured on a diseased machine) |
+
+## FAQ
+
+**Q: What do I lose with a full reset?**
+A: Only the tile layout (reset to default). Installed programs, the "All apps" list, and taskbar pins are untouched.
+
+**Q: The bug came back later.**
+A: Run `fix` again. If it recurs often and you sign in with a Microsoft account, check whether settings sync is on — the cloud may hold a bad layout and keep trying to feed it back (whenever the sync endpoints are reachable).
+
+**Q: Do I need administrator rights?**
+A: Usually not. If a svchost fails to terminate, rerun from an elevated shell.
+
+**Q: Doesn't restoring a backup bring the bug back too?**
+A: It can — the layout and the corruption live in the same opaque blob, so a snapshot predating the fix restores both. Backups exist for "the fix broke something" emergencies, not for archiving a broken layout. Once your layout is stable you can delete `Backups/`.
+
+**Q: Does it work on Windows 11?**
+A: Windows 11 (21H2+) pinned layouts use the same CloudStore mechanism, so it should — but it is untested there, and Win11 has no live tiles anyway, so you rarely need it.
+
+## Real-world case (2026-11, Windows 10 22H2 / 19045)
+
+- Before: CloudStore at 7.4 MB (`$start.tilegrid` / `curatedtilecollection` / roamed copies / graveyard)
+- Guide-style deletion (explorer only): **rewritten within milliseconds** — fix accomplished nothing
+- This tool's flow: the key **stayed deleted** through the 1.5 s post-delete verification ✅
+- After rebuild: 74 KB clean skeleton; moving / pinning / unpinning / reboot-persistence all normal
+
+## Technical background (for the curious)
+
+- [Microsoft official troubleshooting: Start menu errors](https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/troubleshoot-start-menu-errors)
+- [ExplorerPatcher's reverse engineering of the tile engine StartTileData.dll (source of the Local/Roamed/Graveyard/Reconciliation model)](https://github.com/ExplorerPatcher/ep_starttiledata)
+- [superuser: two verified root causes of layout resetting after reboot](https://superuser.com/questions/1212927/windows-10-tile-layout-in-start-menu-resets-after-reboot)
+- The TileDataLayer era (Windows 10 1507–1607) is out of scope; the official remedy there is `tdlrecover.exe`
+
+## Changelog
+
+- **v1.1.0**: conservative surgery mode `-Mode safe` (keeps the layout, clears conflict sources only; supports `-WhatIf` dry runs)
+- **v1.0.0**: initial release — full reset flow (backup → kill all writers → delete CloudStore → rewrite verification → restart shell) + health diagnostics
+
+## Disclaimer
+
+This tool modifies the current user's registry (with an automatic backup beforehand). Provided as is, without warranty of any kind; read the source before running it. See [LICENSE](LICENSE).
+
+## License
+
+[Apache-2.0](LICENSE)
+
+---
+
+# 中文文档
+
+**Windows 10 开始菜单磁贴修复工具** —— 治"磁贴沉底、上移弹回、幽灵残留、布局不保存"
+
+**[English](#-win10-tile-fixer) | 中文**
 
 ## 它治什么病
 
@@ -35,6 +161,19 @@
 
 本工具于 2026-11 在 Windows 10 22H2 (build 19045) 实机验证：教程式删法被回写、修复无效；先杀写入方再删，`CloudStore 7.4 MB → 74 KB`，拖动/固定/取消固定/重启保留全部恢复正常。
 
+## 两种修复模式
+
+| | 完整重置 (`-Mode full`，默认) | 保守手术 (`-Mode safe`，实验) |
+|---|---|---|
+| 删除范围 | 整个 CloudStore 键 | 只删 3 类冲突源条目：漫游属性副本 (`roamedtilepropertiesmap`)、本地易失副本 (`localstartvolatiletilepropertiesmap`)、建议流 (`start.suggestions`) |
+| 磁贴布局 | **重置为出厂默认**，需重新摆放 | **原样保留**（主布局 `start.tilegrid`、本地属性表、墓碑区一律不碰） |
+| 确定性 | 高 | 取决于坏副本是谁：若对账时赢的是漫游/易失副本 → 痊愈；否则无效（无损，可再用完整重置收尾） |
+| 适用场景 | 布局已乱到没法看 / 保守手术无效 | 布局还想保住，想先试试不重置 |
+
+原理：每块磁贴有本地/易失/漫游三份属性副本，"拖动被弹回"是坏副本在**对账（reconciliation）**阶段赢过了你的新写入。保守手术把两个最可能的坏副本（漫游、易失）切掉，逼对账只用干净的本地主数据。**墓碑区（graveyard）绝不能删**——删了墓碑，对账机制会把之前取消固定的磁贴"复活"，幽灵磁贴反而加重。
+
+先用 `-WhatIf` 试运行，看清自己机器上会删哪些条目再决定。
+
 ## 快速开始
 
 需要：Windows 10 1709 及以上 + [PowerShell 7](https://aka.ms/powershell)（没有就装：`winget install Microsoft.PowerShell`）
@@ -50,19 +189,6 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action restore -B
 ```
 
 不需要管理员权限。
-
-## 两种修复模式
-
-| | 完整重置 (`-Mode full`，默认) | 保守手术 (`-Mode safe`，实验) |
-|---|---|---|
-| 删除范围 | 整个 CloudStore 键 | 只删 3 类冲突源条目：漫游属性副本 (`roamedtilepropertiesmap`)、本地易失副本 (`localstartvolatiletilepropertiesmap`)、建议流 (`start.suggestions`) |
-| 磁贴布局 | **重置为出厂默认**，需重新摆放 | **原样保留**（主布局 `start.tilegrid`、本地属性表、墓碑区一律不碰） |
-| 确定性 | 高 | 取决于坏副本是谁：若对账时赢的是漫游/易失副本 → 痊愈；否则无效（无损，可再用完整重置收尾） |
-| 适用场景 | 布局已乱到没法看 / 保守手术无效 | 布局还想保住，想先试试不重置 |
-
-原理：每块磁贴有本地/易失/漫游三份属性副本，"拖动被弹回"是坏副本在**对账（reconciliation）**阶段赢过了你的新写入。保守手术把两个最可能的坏副本（漫游、易失）切掉，逼对账只用干净的本地主数据。**墓碑区（graveyard）绝不能删**——删了墓碑，对账机制会把之前取消固定的磁贴"复活"，幽灵磁贴反而加重。
-
-先用 `-WhatIf` 试运行，看清自己机器上会删哪些条目再决定。
 
 ## 修复时会做什么（完整重置模式）
 
@@ -112,10 +238,6 @@ A: Win11 (21H2+) 的固定布局走同一套 CloudStore 机制，理论可用但
 - [ExplorerPatcher 对磁贴引擎 StartTileData.dll 的逆向（Local/Roamed/Graveyard/Reconciliation 机制出处）](https://github.com/ExplorerPatcher/ep_starttiledata)
 - [superuser：布局重启后重置的两个实锤根因](https://superuser.com/questions/1212927/windows-10-tile-layout-in-start-menu-resets-after-reboot)
 - TileDataLayer 时代（Win10 1507–1607）不适用本工具，官方方案是 `tdlrecover.exe`
-
-## English (short)
-
-**Win10 Tile Fixer** repairs the classic Windows 10 Start-menu tile bugs: new pins stuck at the bottom and immovable, tiles snapping back after being moved, ghost duplicates, and layouts that never persist. Root cause: corruption/bloat of the tile-layout cache in the registry `CloudStore` key. The naive "kill explorer + delete the key" guide fails because per-user services (`CDPUserSvc_*`, `OneSyncSvc_*`) hosted in svchost silently rewrite the stale layout from memory within milliseconds. This tool backs up the key, kills **all** writers, deletes the cache, verifies it *stays* deleted, then restarts the shell. Requires Windows 10 1709+ and PowerShell 7. No admin rights needed. Your tile layout resets to factory default — re-pin once, and it sticks.
 
 ## 更新日志
 

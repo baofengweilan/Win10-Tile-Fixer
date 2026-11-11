@@ -43,13 +43,28 @@
 
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action diagnose   # 只读体检
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action fix        # 备份并修复
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action fix        # 备份并完整重置
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action fix -Mode safe -WhatIf   # 试运行: 只看会删哪些条目
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action fix -Mode safe            # 保守手术: 保留布局
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\TileFixer.ps1 -Action restore -BackupFile .\Backups\CloudStore-backup-xxxx.reg
 ```
 
 不需要管理员权限。
 
-## 修复时会做什么
+## 两种修复模式
+
+| | 完整重置 (`-Mode full`，默认) | 保守手术 (`-Mode safe`，实验) |
+|---|---|---|
+| 删除范围 | 整个 CloudStore 键 | 只删 3 类冲突源条目：漫游属性副本 (`roamedtilepropertiesmap`)、本地易失副本 (`localstartvolatiletilepropertiesmap`)、建议流 (`start.suggestions`) |
+| 磁贴布局 | **重置为出厂默认**，需重新摆放 | **原样保留**（主布局 `start.tilegrid`、本地属性表、墓碑区一律不碰） |
+| 确定性 | 高 | 取决于坏副本是谁：若对账时赢的是漫游/易失副本 → 痊愈；否则无效（无损，可再用完整重置收尾） |
+| 适用场景 | 布局已乱到没法看 / 保守手术无效 | 布局还想保住，想先试试不重置 |
+
+原理：每块磁贴有本地/易失/漫游三份属性副本，"拖动被弹回"是坏副本在**对账（reconciliation）**阶段赢过了你的新写入。保守手术把两个最可能的坏副本（漫游、易失）切掉，逼对账只用干净的本地主数据。**墓碑区（graveyard）绝不能删**——删了墓碑，对账机制会把之前取消固定的磁贴"复活"，幽灵磁贴反而加重。
+
+先用 `-WhatIf` 试运行，看清自己机器上会删哪些条目再决定。
+
+## 修复时会做什么（完整重置模式）
 
 1. 备份 CloudStore 注册表键（+ 磁盘缓存文件夹，如存在）到 `Backups/`
 2. 终止写入方：承载 `CDPUserSvc_*` / `OneSyncSvc_*` / `UserDataPlatformSvc_*` 的 svchost 进程（这些服务之后会按需自动重启，无需手动处理）
@@ -101,6 +116,11 @@ A: Win11 (21H2+) 的固定布局走同一套 CloudStore 机制，理论可用但
 ## English (short)
 
 **Win10 Tile Fixer** repairs the classic Windows 10 Start-menu tile bugs: new pins stuck at the bottom and immovable, tiles snapping back after being moved, ghost duplicates, and layouts that never persist. Root cause: corruption/bloat of the tile-layout cache in the registry `CloudStore` key. The naive "kill explorer + delete the key" guide fails because per-user services (`CDPUserSvc_*`, `OneSyncSvc_*`) hosted in svchost silently rewrite the stale layout from memory within milliseconds. This tool backs up the key, kills **all** writers, deletes the cache, verifies it *stays* deleted, then restarts the shell. Requires Windows 10 1709+ and PowerShell 7. No admin rights needed. Your tile layout resets to factory default — re-pin once, and it sticks.
+
+## 更新日志
+
+- **v1.1.0**：新增保守手术模式 `-Mode safe`（保留布局只清冲突源，支持 `-WhatIf` 试运行）
+- **v1.0.0**：首次发布——完整重置流程（备份 → 全写入方终止 → 删 CloudStore → 回写校验 → 重启 shell）+ 体检诊断
 
 ## 免责声明
 
